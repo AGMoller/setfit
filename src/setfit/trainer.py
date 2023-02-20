@@ -3,17 +3,34 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Union
 
 import evaluate
 import numpy as np
+import torch
+import wandb
 from datasets import DatasetDict
 from sentence_transformers import InputExample, losses
 from sentence_transformers.datasets import SentenceLabelDataset
-from sentence_transformers.losses.BatchHardTripletLoss import BatchHardTripletLossDistanceFunction
+from sentence_transformers.losses.BatchHardTripletLoss import (
+    BatchHardTripletLossDistanceFunction,
+)
 from torch.utils.data import DataLoader
 from tqdm.auto import trange
-from transformers.trainer_utils import HPSearchBackend, default_compute_objective, number_of_arguments, set_seed
+from transformers.trainer_utils import (
+    HPSearchBackend,
+    default_compute_objective,
+    number_of_arguments,
+    set_seed,
+)
 
 from . import logging
-from .integrations import default_hp_search_backend, is_optuna_available, run_hp_search_optuna
-from .modeling import SupConLoss, sentence_pairs_generation, sentence_pairs_generation_multilabel
+from .integrations import (
+    default_hp_search_backend,
+    is_optuna_available,
+    run_hp_search_optuna,
+)
+from .modeling import (
+    SupConLoss,
+    sentence_pairs_generation,
+    sentence_pairs_generation_multilabel,
+)
 from .utils import BestRun, default_hp_space_optuna
 
 
@@ -82,8 +99,11 @@ class SetFitTrainer:
         model: Optional["SetFitModel"] = None,
         train_dataset: Optional["Dataset"] = None,
         eval_dataset: Optional["Dataset"] = None,
+        test_dataset: Optional["Dataset"] = None,
         model_init: Optional[Callable[[], "SetFitModel"]] = None,
-        metric: Union[str, Callable[["Dataset", "Dataset"], Dict[str, float]]] = "accuracy",
+        metric: Union[
+            str, Callable[["Dataset", "Dataset"], Dict[str, float]]
+        ] = "accuracy",
         loss_class=losses.CosineSimilarityLoss,
         num_iterations: int = 20,
         num_epochs: int = 1,
@@ -96,6 +116,9 @@ class SetFitTrainer:
         distance_metric: Callable = BatchHardTripletLossDistanceFunction.cosine_distance,
         margin: float = 0.25,
         samples_per_label: int = 2,
+        text_selection: str = "h_text",
+        wandb_project: str = "ten_social_dim",
+        wandb_entity: str = "cocoons",
     ):
         if (warmup_proportion < 0.0) or (warmup_proportion > 1.0):
             raise ValueError(
@@ -104,6 +127,7 @@ class SetFitTrainer:
 
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
+        self.test_dataset = test_dataset
         self.model_init = model_init
         self.metric = metric
         self.loss_class = loss_class
@@ -118,19 +142,49 @@ class SetFitTrainer:
         self.distance_metric = distance_metric
         self.margin = margin
         self.samples_per_label = samples_per_label
+        self.text_selection = text_selection
+        self.wandb_project = wandb_project
+        self.wandb_entity = wandb_entity
 
         if model is None:
             if model_init is not None:
                 model = self.call_model_init()
             else:
-                raise RuntimeError("`SetFitTrainer` requires either a `model` or `model_init` argument")
+                raise RuntimeError(
+                    "`SetFitTrainer` requires either a `model` or `model_init` argument"
+                )
         else:
             if model_init is not None:
-                raise RuntimeError("`SetFitTrainer` requires either a `model` or `model_init` argument, but not both")
+                raise RuntimeError(
+                    "`SetFitTrainer` requires either a `model` or `model_init` argument, but not both"
+                )
 
         self.model = model
         self.hp_search_backend = None
         self._freeze = True  # If True, will train the body only; otherwise, train the body and head
+
+    def init_wandb(self, model_id: str):
+        wandb.init(
+            project=self.wandb_project,
+            entity=self.wandb_entity,
+            name=f"SetFitMultiLabel_{model_id}",
+            group="SetFitMultiLabel",
+        )
+
+        # Add config parameters
+        wandb.config.update(
+            {
+                "batch_size": self.batch_size,
+                "lr": self.learning_rate,
+                "num_iterations": self.num_iterations,
+                "number_epochs": self.num_epochs,
+                "ckpt": self.model,
+                "text_selection": self.text_selection,
+            }
+        )
+
+    def finish_wandb(self):
+        wandb.finish()
 
     def _validate_column_mapping(self, dataset: "Dataset") -> None:
         """
@@ -168,7 +222,9 @@ class SetFitTrainer:
                     f"but the dataset had the columns {sorted(column_names)}."
                 )
 
-    def _apply_column_mapping(self, dataset: "Dataset", column_mapping: Dict[str, str]) -> "Dataset":
+    def _apply_column_mapping(
+        self, dataset: "Dataset", column_mapping: Dict[str, str]
+    ) -> "Dataset":
         """
         Applies the provided column mapping to the dataset, renaming columns accordingly.
         Extra features not in the column mapping are prefixed with `"feat_"`.
@@ -176,7 +232,11 @@ class SetFitTrainer:
         dataset = dataset.rename_columns(
             {
                 **column_mapping,
-                **{col: f"feat_{col}" for col in dataset.column_names if col not in column_mapping},
+                **{
+                    col: f"feat_{col}"
+                    for col in dataset.column_names
+                    if col not in column_mapping
+                },
             }
         )
         dset_format = dataset.format
@@ -202,7 +262,9 @@ class SetFitTrainer:
                 if old_attr is not None:
                     value = type(old_attr)(value)
                 setattr(self, key, value)
-            elif number_of_arguments(self.model_init) == 0:  # we do not warn if model_init could be using it
+            elif (
+                number_of_arguments(self.model_init) == 0
+            ):  # we do not warn if model_init could be using it
                 logger.warning(
                     f"Trying to set {key!r} in the hyperparameter search but there is no corresponding field in "
                     "`SetFitTrainer`, and `model_init` does not take any arguments."
@@ -219,7 +281,9 @@ class SetFitTrainer:
         if self.hp_search_backend is None or trial is None:
             return
 
-        if isinstance(trial, Dict):  # For passing a Dict to train() -- mostly unused for now
+        if isinstance(
+            trial, Dict
+        ):  # For passing a Dict to train() -- mostly unused for now
             params = trial
         elif self.hp_search_backend == HPSearchBackend.OPTUNA:
             params = self.hp_space(trial)
@@ -249,7 +313,9 @@ class SetFitTrainer:
         Note: call this function only when using the differentiable head.
         """
         if not self.model.has_differentiable_head:
-            raise ValueError("Please use the differentiable head in `SetFitModel` when calling this function.")
+            raise ValueError(
+                "Please use the differentiable head in `SetFitModel` when calling this function."
+            )
 
         self._freeze = True  # Currently use self._freeze as a switch
         self.model.freeze("head")
@@ -264,7 +330,9 @@ class SetFitTrainer:
                 Whether to freeze the body when unfreeze the head.
         """
         if not self.model.has_differentiable_head:
-            raise ValueError("Please use the differentiable head in `SetFitModel` when calling this function.")
+            raise ValueError(
+                "Please use the differentiable head in `SetFitModel` when calling this function."
+            )
 
         self._freeze = False  # Currently use self._freeze as a switch
         self.model.unfreeze("head")
@@ -311,24 +379,41 @@ class SetFitTrainer:
             show_progress_bar (`bool`, *optional*, defaults to `True`):
                 Whether to show a bar that indicates training progress.
         """
-        set_seed(self.seed)  # Seed must be set before instantiating the model when using model_init.
+        set_seed(
+            self.seed
+        )  # Seed must be set before instantiating the model when using model_init.
 
         if trial:  # Trial and model initialization
-            self._hp_search_setup(trial)  # sets trainer parameters and initializes model
+            self._hp_search_setup(
+                trial
+            )  # sets trainer parameters and initializes model
 
         if self.train_dataset is None:
-            raise ValueError("Training requires a `train_dataset` given to the `SetFitTrainer` initialization.")
+            raise ValueError(
+                "Training requires a `train_dataset` given to the `SetFitTrainer` initialization."
+            )
 
         self._validate_column_mapping(self.train_dataset)
         train_dataset = self.train_dataset
+        eval_dataset = self.eval_dataset
         if self.column_mapping is not None:
             logger.info("Applying column mapping to training dataset")
-            train_dataset = self._apply_column_mapping(self.train_dataset, self.column_mapping)
+            train_dataset = self._apply_column_mapping(
+                self.train_dataset, self.column_mapping
+            )
+            eval_dataset = self._apply_column_mapping(
+                self.eval_dataset, self.column_mapping
+            )
 
         x_train = train_dataset["text"]
         y_train = train_dataset["label"]
+        x_eval = eval_dataset["text"]
+        y_eval = eval_dataset["label"]
+
         if self.loss_class is None:
-            logger.warning("No `loss_class` detected! Using `CosineSimilarityLoss` as the default.")
+            logger.warning(
+                "No `loss_class` detected! Using `CosineSimilarityLoss` as the default."
+            )
             self.loss_class = losses.CosineSimilarityLoss
 
         num_epochs = num_epochs or self.num_epochs
@@ -344,11 +429,18 @@ class SetFitTrainer:
                 losses.BatchHardSoftMarginTripletLoss,
                 SupConLoss,
             ]:
-                train_examples = [InputExample(texts=[text], label=label) for text, label in zip(x_train, y_train)]
-                train_data_sampler = SentenceLabelDataset(train_examples, samples_per_label=self.samples_per_label)
+                train_examples = [
+                    InputExample(texts=[text], label=label)
+                    for text, label in zip(x_train, y_train)
+                ]
+                train_data_sampler = SentenceLabelDataset(
+                    train_examples, samples_per_label=self.samples_per_label
+                )
 
                 batch_size = min(batch_size, len(train_data_sampler))
-                train_dataloader = DataLoader(train_data_sampler, batch_size=batch_size, drop_last=True)
+                train_dataloader = DataLoader(
+                    train_data_sampler, batch_size=batch_size, drop_last=True
+                )
 
                 if self.loss_class is losses.BatchHardSoftMarginTripletLoss:
                     train_loss = self.loss_class(
@@ -366,7 +458,11 @@ class SetFitTrainer:
             else:
                 train_examples = []
 
-                for _ in trange(self.num_iterations, desc="Generating Training Pairs", disable=not show_progress_bar):
+                for _ in trange(
+                    self.num_iterations,
+                    desc="Generating Training Pairs",
+                    disable=not show_progress_bar,
+                ):
                     if self.model.multi_target_strategy is not None:
                         train_examples = sentence_pairs_generation_multilabel(
                             np.array(x_train), np.array(y_train), train_examples
@@ -376,7 +472,9 @@ class SetFitTrainer:
                             np.array(x_train), np.array(y_train), train_examples
                         )
 
-                train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=batch_size)
+                train_dataloader = DataLoader(
+                    train_examples, shuffle=True, batch_size=batch_size
+                )
                 train_loss = self.loss_class(self.model.model_body)
 
             total_train_steps = len(train_dataloader) * num_epochs
@@ -402,15 +500,18 @@ class SetFitTrainer:
                 x_train,
                 y_train,
                 num_epochs=num_epochs,
+                x_eval=x_eval,
+                y_eval=y_eval,
                 batch_size=batch_size,
                 learning_rate=learning_rate,
                 body_learning_rate=body_learning_rate,
                 l2_weight=l2_weight,
                 max_length=max_length,
                 show_progress_bar=True,
+                metric=self.metric,
             )
 
-    def evaluate(self):
+    def evaluate(self, use_test_set: bool = False):
         """
         Computes the metrics for a given classifier.
 
@@ -418,28 +519,49 @@ class SetFitTrainer:
             `Dict[str, float]`: The evaluation metrics.
         """
 
-        self._validate_column_mapping(self.eval_dataset)
-        eval_dataset = self.eval_dataset
+        if use_test_set:
+            if self.test_dataset is None:
+                raise ValueError(
+                    "Evaluation requires a `test_dataset` given to the `SetFitTrainer` initialization."
+                )
+            self._validate_column_mapping(self.test_dataset)
+            eval_dataset = self.test_dataset
+        else:
+            self._validate_column_mapping(self.eval_dataset)
+            eval_dataset = self.eval_dataset
 
         if self.column_mapping is not None:
             logger.info("Applying column mapping to evaluation dataset")
-            eval_dataset = self._apply_column_mapping(self.eval_dataset, self.column_mapping)
+            eval_dataset = self._apply_column_mapping(
+                self.eval_dataset, self.column_mapping
+            )
 
         x_test = eval_dataset["text"]
         y_test = eval_dataset["label"]
 
         logger.info("***** Running evaluation *****")
         y_pred = self.model.predict(x_test)
+        probs = self.model.predict_proba(x_test)
 
         if isinstance(self.metric, str):
-            metric_config = "multilabel" if self.model.multi_target_strategy is not None else None
+            metric_config = (
+                "multilabel" if self.model.multi_target_strategy is not None else None
+            )
             metric_fn = evaluate.load(self.metric, config_name=metric_config)
 
             return metric_fn.compute(predictions=y_pred, references=y_test)
 
         elif callable(self.metric):
-            return self.metric(y_pred, y_test)
-
+            eval_results = self.metric(
+                probs, torch.tensor(y_test, dtype=torch.float32), is_test=True
+            )
+            # If wandb is initialized, log the final test results
+            if wandb.run is not None and use_test_set:
+                test_results = wandb.Table(
+                    data=[list(eval_results.values())],
+                    columns=list(eval_results.keys()),
+                )
+                wandb.log({"test_results": test_results})
         else:
             raise ValueError("metric must be a string or a callable")
 
@@ -495,12 +617,19 @@ class SetFitTrainer:
         if backend is None:
             backend = default_hp_search_backend()
             if backend is None:
-                raise RuntimeError("optuna should be installed. " "To install optuna run `pip install optuna`. ")
+                raise RuntimeError(
+                    "optuna should be installed. "
+                    "To install optuna run `pip install optuna`. "
+                )
         backend = HPSearchBackend(backend)
         if backend == HPSearchBackend.OPTUNA and not is_optuna_available():
-            raise RuntimeError("You picked the optuna backend, but it is not installed. Use `pip install optuna`.")
+            raise RuntimeError(
+                "You picked the optuna backend, but it is not installed. Use `pip install optuna`."
+            )
         elif backend != HPSearchBackend.OPTUNA:
-            raise RuntimeError("Only optuna backend is supported for hyperparameter search.")
+            raise RuntimeError(
+                "Only optuna backend is supported for hyperparameter search."
+            )
         self.hp_search_backend = backend
         if self.model_init is None:
             raise RuntimeError(
@@ -509,7 +638,11 @@ class SetFitTrainer:
 
         self.hp_space = default_hp_space_optuna if hp_space is None else hp_space
         self.hp_name = hp_name
-        self.compute_objective = default_compute_objective if compute_objective is None else compute_objective
+        self.compute_objective = (
+            default_compute_objective
+            if compute_objective is None
+            else compute_objective
+        )
 
         backend_dict = {
             HPSearchBackend.OPTUNA: run_hp_search_optuna,

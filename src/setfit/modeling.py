@@ -1,7 +1,9 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple, Union
+
+import wandb
 
 
 # Google Colab runs on Python 3.7, so we need this to be compatible
@@ -90,7 +92,9 @@ copyright = {{Creative Commons Attribution 4.0 International}}
 
 
 class SetFitBaseModel:
-    def __init__(self, model, max_seq_length: int, add_normalization_layer: bool) -> None:
+    def __init__(
+        self, model, max_seq_length: int, add_normalization_layer: bool
+    ) -> None:
         self.model = SentenceTransformer(model)
         self.model.max_seq_length = max_seq_length
 
@@ -281,23 +285,41 @@ class SetFitModel(PyTorchModelHubMixin):
         x_train: List[str],
         y_train: Union[List[int], List[List[int]]],
         num_epochs: int,
+        x_eval: Optional[List[str]] = None,
+        y_eval: Optional[Union[List[int], List[List[int]]]] = None,
         batch_size: Optional[int] = None,
         learning_rate: Optional[float] = None,
         body_learning_rate: Optional[float] = None,
         l2_weight: Optional[float] = None,
         max_length: Optional[int] = None,
         show_progress_bar: Optional[bool] = None,
+        metric: Optional[Callable] = None,
     ) -> None:
         if self.has_differentiable_head:  # train with pyTorch
             device = self.model_body.device
-            self.model_body.train()
+            # self.model_body.train()
             self.model_head.train()
 
-            dataloader = self._prepare_dataloader(x_train, y_train, batch_size, max_length)
+            dataloader = self._prepare_dataloader(
+                x_train, y_train, batch_size, max_length
+            )
+            dataloader_eval = self._prepare_dataloader(
+                x_eval, y_eval, batch_size, max_length
+            )
             criterion = self.model_head.get_loss_fn()
-            optimizer = self._prepare_optimizer(learning_rate, body_learning_rate, l2_weight)
-            scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
-            for epoch_idx in trange(num_epochs, desc="Epoch", disable=not show_progress_bar):
+            optimizer = self._prepare_optimizer(
+                learning_rate, body_learning_rate, l2_weight
+            )
+            scheduler = torch.optim.lr_scheduler.StepLR(
+                optimizer, step_size=5, gamma=0.5
+            )
+            for epoch_idx in trange(
+                num_epochs, desc="Epoch", disable=not show_progress_bar
+            ):
+                epoch_loss = 0.0
+
+                self.model_head.train()
+
                 for batch in dataloader:
                     features, labels = batch
                     optimizer.zero_grad()
@@ -313,12 +335,61 @@ class SetFitModel(PyTorchModelHubMixin):
                     logits = outputs["logits"]
 
                     loss = criterion(logits, labels)
+
+                    epoch_loss += loss.item()
+
                     loss.backward()
                     optimizer.step()
 
                 scheduler.step()
+
+                # Log the loss to wandb if initialized
+                if wandb.run is not None:
+                    wandb.log({"train_loss": epoch_loss}, step=epoch_idx)
+                else:
+                    print(f"Epoch {epoch_idx} loss: {epoch_loss}")
+
+                if x_eval is not None and y_eval is not None:
+                    # Set model to eval mode
+                    self.model_head.eval()
+
+                    # collect all predictions and labels into a single list
+
+                    all_preds = []
+                    all_labels = []
+
+                    for eval_batch in dataloader_eval:
+                        eval_features, eval_labels = eval_batch
+                        eval_features = {
+                            k: v.to(device) for k, v in eval_features.items()
+                        }
+                        eval_labels = eval_labels.to(device)
+
+                        eval_outputs = self.model_body(eval_features)
+                        if self.normalize_embeddings:
+                            eval_outputs = torch.nn.functional.normalize(
+                                eval_outputs, p=2, dim=1
+                            )
+                        eval_outputs = self.model_head(eval_outputs)
+                        eval_logits = eval_outputs["logits"]
+
+                        all_preds.append(eval_logits)
+                        all_labels.append(eval_labels)
+
+                    eval_logits = torch.cat(all_preds, dim=0)
+                    eval_labels = torch.cat(all_labels, dim=0)
+
+                    metrics = metric(eval_logits, eval_labels)
+
+                    if wandb.run is not None:
+                        wandb.log({**metrics}, step=epoch_idx)
+                    else:
+                        print(f"Epoch {epoch_idx} metrics: {metrics}")
+
         else:  # train with sklearn
-            embeddings = self.model_body.encode(x_train, normalize_embeddings=self.normalize_embeddings)
+            embeddings = self.model_body.encode(
+                x_train, normalize_embeddings=self.normalize_embeddings
+            )
             self.model_head.fit(embeddings, y_train)
 
     def _prepare_dataloader(
@@ -404,7 +475,9 @@ class SetFitModel(PyTorchModelHubMixin):
         for param in model.parameters():
             param.requires_grad = not to_freeze
 
-    def predict(self, x_test: List[str], as_numpy: bool = False) -> Union[torch.Tensor, "ndarray"]:
+    def predict(
+        self, x_test: List[str], as_numpy: bool = False
+    ) -> Union[torch.Tensor, "ndarray"]:
         embeddings = self.model_body.encode(
             x_test,
             normalize_embeddings=self.normalize_embeddings,
@@ -420,7 +493,9 @@ class SetFitModel(PyTorchModelHubMixin):
 
         return outputs
 
-    def predict_proba(self, x_test: List[str], as_numpy: bool = False) -> Union[torch.Tensor, "ndarray"]:
+    def predict_proba(
+        self, x_test: List[str], as_numpy: bool = False
+    ) -> Union[torch.Tensor, "ndarray"]:
         embeddings = self.model_body.encode(
             x_test,
             normalize_embeddings=self.normalize_embeddings,
@@ -447,7 +522,9 @@ class SetFitModel(PyTorchModelHubMixin):
         """
         # Note that we must also set _target_device, or any SentenceTransformer.fit() call will reset
         # the body location
-        self.model_body._target_device = device if isinstance(device, torch.device) else torch.device(device)
+        self.model_body._target_device = (
+            device if isinstance(device, torch.device) else torch.device(device)
+        )
         self.model_body = self.model_body.to(device)
 
         if self.has_differentiable_head:
@@ -455,7 +532,9 @@ class SetFitModel(PyTorchModelHubMixin):
 
         return self
 
-    def create_model_card(self, path: str, model_name: Optional[str] = "SetFit Model") -> None:
+    def create_model_card(
+        self, path: str, model_name: Optional[str] = "SetFit Model"
+    ) -> None:
         """Creates and saves a model card for a SetFit model.
 
         Args:
@@ -493,7 +572,9 @@ class SetFitModel(PyTorchModelHubMixin):
         normalize_embeddings: bool = False,
         **model_kwargs,
     ) -> "SetFitModel":
-        model_body = SentenceTransformer(model_id, cache_folder=cache_dir, use_auth_token=use_auth_token)
+        model_body = SentenceTransformer(
+            model_id, cache_folder=cache_dir, use_auth_token=use_auth_token
+        )
         target_device = model_body._target_device
         model_body.to(target_device)  # put `model_body` on the target device
 
@@ -531,6 +612,7 @@ class SetFitModel(PyTorchModelHubMixin):
             model_head = joblib.load(model_head_file)
         else:
             head_params = model_kwargs.get("head_params", {})
+            # use_differentiable_head = model_kwargs.get("use_differentiable_head", False)
             if use_differentiable_head:
                 if multi_target_strategy is None:
                     use_multitarget = False
@@ -560,7 +642,9 @@ class SetFitModel(PyTorchModelHubMixin):
                     elif multi_target_strategy == "classifier-chain":
                         multilabel_classifier = ClassifierChain(clf)
                     else:
-                        raise ValueError(f"multi_target_strategy {multi_target_strategy} is not supported.")
+                        raise ValueError(
+                            f"multi_target_strategy {multi_target_strategy} is not supported."
+                        )
 
                     model_head = multilabel_classifier
                 else:
@@ -580,7 +664,9 @@ class SupConLoss(nn.Module):
     It also supports the unsupervised contrastive loss in SimCLR.
     """
 
-    def __init__(self, model, temperature=0.07, contrast_mode="all", base_temperature=0.07):
+    def __init__(
+        self, model, temperature=0.07, contrast_mode="all", base_temperature=0.07
+    ):
         super(SupConLoss, self).__init__()
         self.model = model
         self.temperature = temperature
@@ -613,7 +699,10 @@ class SupConLoss(nn.Module):
         device = features.device
 
         if len(features.shape) < 3:
-            raise ValueError("`features` needs to be [bsz, n_views, ...]," "at least 3 dimensions are required")
+            raise ValueError(
+                "`features` needs to be [bsz, n_views, ...],"
+                "at least 3 dimensions are required"
+            )
         if len(features.shape) > 3:
             features = features.view(features.shape[0], features.shape[1], -1)
 
@@ -642,7 +731,9 @@ class SupConLoss(nn.Module):
             raise ValueError("Unknown mode: {}".format(self.contrast_mode))
 
         # Compute logits
-        anchor_dot_contrast = torch.div(torch.matmul(anchor_feature, contrast_feature.T), self.temperature)
+        anchor_dot_contrast = torch.div(
+            torch.matmul(anchor_feature, contrast_feature.T), self.temperature
+        )
         # For numerical stability
         logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
         logits = anchor_dot_contrast - logits_max.detach()
@@ -688,12 +779,16 @@ def sentence_pairs_generation(sentences, labels, pairs):
         positive_sentence = sentences[second_idx]
         # Prepare a positive pair and update the sentences and labels
         # lists, respectively
-        pairs.append(InputExample(texts=[current_sentence, positive_sentence], label=1.0))
+        pairs.append(
+            InputExample(texts=[current_sentence, positive_sentence], label=1.0)
+        )
 
         third_idx = np.random.choice(negative_idxs[label_to_idx[label]])
         negative_sentence = sentences[third_idx]
         # Prepare a negative pair of sentences and update our lists
-        pairs.append(InputExample(texts=[current_sentence, negative_sentence], label=0.0))
+        pairs.append(
+            InputExample(texts=[current_sentence, negative_sentence], label=0.0)
+        )
     # Return a 2-tuple of our sentence pairs and labels
     return pairs
 
@@ -712,14 +807,18 @@ def sentence_pairs_generation_multilabel(sentences, labels, pairs):
                 positive_sentence = sentences[second_idx]
                 # Prepare a positive pair and update the sentences and labels
                 # lists, respectively
-                pairs.append(InputExample(texts=[current_sentence, positive_sentence], label=1.0))
+                pairs.append(
+                    InputExample(texts=[current_sentence, positive_sentence], label=1.0)
+                )
 
             # Search for sample that don't have a label in common with current
             # sentence
             negative_idx = np.where(labels.dot(labels[first_idx, :].T) == 0)[0]
             negative_sentence = sentences[np.random.choice(negative_idx)]
             # Prepare a negative pair of sentences and update our lists
-            pairs.append(InputExample(texts=[current_sentence, negative_sentence], label=0.0))
+            pairs.append(
+                InputExample(texts=[current_sentence, negative_sentence], label=0.0)
+            )
     # Return a 2-tuple of our sentence pairs and labels
     return pairs
 
@@ -736,12 +835,16 @@ def sentence_pairs_generation_cos_sim(sentences, pairs, cos_sim_matrix):
 
         cos_sim = float(cos_sim_matrix[first_idx][second_idx])
         paired_sentence = sentences[second_idx]
-        pairs.append(InputExample(texts=[current_sentence, paired_sentence], label=cos_sim))
+        pairs.append(
+            InputExample(texts=[current_sentence, paired_sentence], label=cos_sim)
+        )
 
         third_idx = np.random.choice([x for x in idx if x != first_idx])
         cos_sim = float(cos_sim_matrix[first_idx][third_idx])
         paired_sentence = sentences[third_idx]
-        pairs.append(InputExample(texts=[current_sentence, paired_sentence], label=cos_sim))
+        pairs.append(
+            InputExample(texts=[current_sentence, paired_sentence], label=cos_sim)
+        )
 
     return pairs
 
