@@ -178,7 +178,6 @@ class SetFitTrainer:
                 "lr": self.learning_rate,
                 "num_iterations": self.num_iterations,
                 "number_epochs": self.num_epochs,
-                "ckpt": self.model,
                 "text_selection": self.text_selection,
             }
         )
