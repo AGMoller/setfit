@@ -119,6 +119,7 @@ class SetFitTrainer:
         text_selection: str = "h_text",
         wandb_project: str = "ten_social_dim",
         wandb_entity: str = "cocoons",
+        config: Dict[str, Any] = {},
     ):
         if (warmup_proportion < 0.0) or (warmup_proportion > 1.0):
             raise ValueError(
@@ -145,6 +146,7 @@ class SetFitTrainer:
         self.text_selection = text_selection
         self.wandb_project = wandb_project
         self.wandb_entity = wandb_entity
+        self.config = config
 
         if model is None:
             if model_init is not None:
@@ -172,15 +174,7 @@ class SetFitTrainer:
         )
 
         # Add config parameters
-        wandb.config.update(
-            {
-                "batch_size": self.batch_size,
-                "lr": self.learning_rate,
-                "num_iterations": self.num_iterations,
-                "number_epochs": self.num_epochs,
-                "text_selection": self.text_selection,
-            }
-        )
+        wandb.config.update(self.config)
 
     def finish_wandb(self):
         wandb.finish()
@@ -561,6 +555,7 @@ class SetFitTrainer:
                     columns=list(eval_results.keys()),
                 )
                 wandb.log({"test_results": test_results})
+            return eval_results
         else:
             raise ValueError("metric must be a string or a callable")
 
