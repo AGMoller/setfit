@@ -90,7 +90,9 @@ def get_templated_dataset(
     if column_names:
         missing_columns = required_columns.difference(column_names)
         if missing_columns:
-            raise ValueError(f"The following columns are missing from the input dataset: {missing_columns}.")
+            raise ValueError(
+                f"The following columns are missing from the input dataset: {missing_columns}."
+            )
 
     if bool(reference_dataset) == bool(candidate_labels):
         raise ValueError(
@@ -124,7 +126,9 @@ def add_templated_examples(*args, **kwargs) -> None:
     )
 
 
-def get_candidate_labels(dataset_name: str, label_names_column: str = "label_text") -> List[str]:
+def get_candidate_labels(
+    dataset_name: str, label_names_column: str = "label_text"
+) -> List[str]:
     dataset = load_dataset(dataset_name, split="train")
 
     try:
@@ -156,13 +160,17 @@ def create_samples(df: pd.DataFrame, sample_size: int, seed: int) -> pd.DataFram
     for label in df["label"].unique():
         subset = df.query(f"label == {label}")
         if len(subset) > sample_size:
-            examples.append(subset.sample(sample_size, random_state=seed, replace=False))
+            examples.append(
+                subset.sample(sample_size, random_state=seed, replace=False)
+            )
         else:
             examples.append(subset)
     return pd.concat(examples)
 
 
-def sample_dataset(dataset: Dataset, label_column: str = "label", num_samples: int = 8, seed: int = 42) -> Dataset:
+def sample_dataset(
+    dataset: Dataset, label_column: str = "label", num_samples: int = 8, seed: int = 42
+) -> Dataset:
     """Samples a Dataset to create an equal number of samples per class (when possible)."""
     shuffled_dataset = dataset.shuffle(seed=seed)
 
@@ -194,37 +202,51 @@ def create_fewshot_splits(
 
     for sample_size in sample_sizes:
         if add_data_augmentation:
-            augmented_df = get_templated_dataset(reference_dataset=dataset_name, sample_size=sample_size).to_pandas()
+            augmented_df = get_templated_dataset(
+                reference_dataset=dataset_name, sample_size=sample_size
+            ).to_pandas()
         for idx, seed in enumerate(SEEDS):
             split_df = create_samples(df, sample_size, seed)
             if add_data_augmentation:
-                split_df = pd.concat([split_df, augmented_df], axis=0).sample(frac=1, random_state=seed)
-            splits_ds[f"train-{sample_size}-{idx}"] = Dataset.from_pandas(split_df, preserve_index=False)
+                split_df = pd.concat([split_df, augmented_df], axis=0).sample(
+                    frac=1, random_state=seed
+                )
+            splits_ds[f"train-{sample_size}-{idx}"] = Dataset.from_pandas(
+                split_df, preserve_index=False
+            )
     return splits_ds
 
 
-def create_samples_multilabel(df: pd.DataFrame, sample_size: int, seed: int) -> pd.DataFrame:
+def create_samples_multilabel(
+    df: pd.DataFrame, sample_size: int, seed: int
+) -> pd.DataFrame:
     """Samples a DataFrame to create an equal number of samples per class (when possible)."""
     examples = []
     column_labels = [_col for _col in df.columns.tolist() if _col != "text"]
     for label in column_labels:
         subset = df.query(f"{label} == 1")
         if len(subset) > sample_size:
-            examples.append(subset.sample(sample_size, random_state=seed, replace=False))
+            examples.append(
+                subset.sample(sample_size, random_state=seed, replace=False)
+            )
         else:
             examples.append(subset)
     # Dropping duplicates for samples selected multiple times as they have multi labels
     return pd.concat(examples).drop_duplicates()
 
 
-def create_fewshot_splits_multilabel(dataset: Dataset, sample_sizes: List[int]) -> DatasetDict:
+def create_fewshot_splits_multilabel(
+    dataset: Dataset, sample_sizes: List[int]
+) -> DatasetDict:
     """Creates training splits from the dataset with an equal number of samples per class (when possible)."""
     splits_ds = DatasetDict()
     df = dataset.to_pandas()
     for sample_size in sample_sizes:
         for idx, seed in enumerate(SEEDS):
             split_df = create_samples_multilabel(df, sample_size, seed)
-            splits_ds[f"train-{sample_size}-{idx}"] = Dataset.from_pandas(split_df, preserve_index=False)
+            splits_ds[f"train-{sample_size}-{idx}"] = Dataset.from_pandas(
+                split_df, preserve_index=False
+            )
     return splits_ds
 
 
@@ -289,6 +311,11 @@ class SetFitDataset(TorchDataset):
 
         # convert to tensors
         features = {k: torch.Tensor(v).int() for k, v in features.items()}
-        labels = torch.Tensor(labels)
+        if isinstance(labels[0], torch.Tensor):
+            labels = torch.stack(labels)
+        else:
+            labels = torch.Tensor(labels)
+
         labels = labels.long() if len(labels.size()) == 1 else labels.float()
+
         return features, labels
