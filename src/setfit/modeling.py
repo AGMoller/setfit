@@ -382,6 +382,7 @@ class SetFitModel(PyTorchModelHubMixin):
                     metrics = metric(eval_logits, eval_labels)
 
                     if wandb.run is not None:
+                        metrics = {"eval/" + k: v for k, v in metrics.items()}
                         wandb.log({**metrics}, step=epoch_idx)
                     else:
                         print(f"Epoch {epoch_idx} metrics: {metrics}")
