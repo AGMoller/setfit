@@ -548,13 +548,6 @@ class SetFitTrainer:
             eval_results = self.metric(
                 probs, torch.tensor(y_test, dtype=torch.float32), is_test=True
             )
-            # If wandb is initialized, log the final test results
-            if wandb.run is not None and use_test_set:
-                test_results = wandb.Table(
-                    data=[list(eval_results.values())],
-                    columns=list(eval_results.keys()),
-                )
-                wandb.log({"test_results": test_results})
             return eval_results
         else:
             raise ValueError("metric must be a string or a callable")
