@@ -345,7 +345,7 @@ class SetFitModel(PyTorchModelHubMixin):
 
                 # Log the loss to wandb if initialized
                 if wandb.run is not None:
-                    wandb.log({"train_loss": epoch_loss}, step=epoch_idx)
+                    wandb.log({"train/train_loss": epoch_loss}, step=epoch_idx)
                 else:
                     print(f"Epoch {epoch_idx} loss: {epoch_loss}")
 
