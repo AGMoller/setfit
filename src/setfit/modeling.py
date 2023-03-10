@@ -347,39 +347,42 @@ class SetFitModel(PyTorchModelHubMixin):
                 if wandb.run is not None:
                     wandb.log(
                         {
-                            "train/loss": epoch_loss / len(dataloader), 
-                            "train/epoch": epoch_idx + 1
-                        }, 
-                        step=epoch_idx + 1)
+                            "train/loss": epoch_loss / len(dataloader),
+                            "train/epoch": epoch_idx + 1,
+                        },
+                        step=epoch_idx + 1,
+                    )
                 else:
                     print(f"Epoch {epoch_idx} loss: {epoch_loss / len(dataloader)}")
 
                 if x_eval is not None and y_eval is not None:
-                    # Set model to eval mode
-                    self.model_head.eval()
+                    # Disable gradient calculation
+                    with torch.no_grad():
+                        # Set model to eval mode
+                        self.model_head.eval()
 
-                    # collect all predictions and labels into a single list
+                        # collect all predictions and labels into a single list
 
-                    all_preds = []
-                    all_labels = []
+                        all_preds = []
+                        all_labels = []
 
-                    for eval_batch in dataloader_eval:
-                        eval_features, eval_labels = eval_batch
-                        eval_features = {
-                            k: v.to(device) for k, v in eval_features.items()
-                        }
-                        eval_labels = eval_labels.to(device)
+                        for eval_batch in dataloader_eval:
+                            eval_features, eval_labels = eval_batch
+                            eval_features = {
+                                k: v.to(device) for k, v in eval_features.items()
+                            }
+                            eval_labels = eval_labels.to(device)
 
-                        eval_outputs = self.model_body(eval_features)
-                        if self.normalize_embeddings:
-                            eval_outputs = torch.nn.functional.normalize(
-                                eval_outputs, p=2, dim=1
-                            )
-                        eval_outputs = self.model_head(eval_outputs)
-                        eval_logits = eval_outputs["logits"]
+                            eval_outputs = self.model_body(eval_features)
+                            if self.normalize_embeddings:
+                                eval_outputs = torch.nn.functional.normalize(
+                                    eval_outputs, p=2, dim=1
+                                )
+                            eval_outputs = self.model_head(eval_outputs)
+                            eval_logits = eval_outputs["logits"]
 
-                        all_preds.append(eval_logits)
-                        all_labels.append(eval_labels)
+                            all_preds.append(eval_logits)
+                            all_labels.append(eval_labels)
 
                     eval_logits = torch.cat(all_preds, dim=0)
                     eval_labels = torch.cat(all_labels, dim=0)
@@ -388,7 +391,10 @@ class SetFitModel(PyTorchModelHubMixin):
 
                     if wandb.run is not None:
                         metrics = {"eval/" + k: v for k, v in metrics.items()}
-                        wandb.log({**metrics, "train/epoch":epoch_idx+1}, step=epoch_idx+1)
+                        wandb.log(
+                            {**metrics, "train/epoch": epoch_idx + 1},
+                            step=epoch_idx + 1,
+                        )
                     else:
                         print(f"Epoch {epoch_idx} metrics: {metrics}")
 
