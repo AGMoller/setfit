@@ -462,7 +462,9 @@ class SetFitTrainer:
                         )
                     else:
                         train_examples = sentence_pairs_generation(
-                            np.array(x_train), np.array(y_train), train_examples
+                            np.array(x_train),
+                            np.array(train_dataset["feat_target"]),
+                            train_examples,
                         )
 
                 train_dataloader = DataLoader(

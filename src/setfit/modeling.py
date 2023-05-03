@@ -332,9 +332,10 @@ class SetFitModel(PyTorchModelHubMixin):
                     if self.normalize_embeddings:
                         outputs = torch.nn.functional.normalize(outputs, p=2, dim=1)
                     outputs = self.model_head(outputs)
-                    logits = outputs["logits"]
 
-                    loss = criterion(logits, labels)
+                    logits, probs = outputs["logits"], outputs["probs"]
+
+                    loss = criterion(probs, labels)
 
                     epoch_loss += loss.item()
 
@@ -347,13 +348,15 @@ class SetFitModel(PyTorchModelHubMixin):
                 if wandb.run is not None:
                     wandb.log(
                         {
-                            "train/loss": epoch_loss / len(dataloader),
+                            "train/loss": epoch_loss / len(dataloader.dataset),
                             "train/epoch": epoch_idx + 1,
                         },
                         step=epoch_idx + 1,
                     )
                 else:
-                    print(f"Epoch {epoch_idx} loss: {epoch_loss / len(dataloader)}")
+                    print(
+                        f"Epoch {epoch_idx} loss: {epoch_loss / len(dataloader.dataset)}"
+                    )
 
                 if x_eval is not None and y_eval is not None:
                     # Disable gradient calculation
@@ -450,8 +453,6 @@ class SetFitModel(PyTorchModelHubMixin):
         body_learning_rate: Optional[float],
         l2_weight: float,
     ) -> torch.optim.Optimizer:
-        body_learning_rate = body_learning_rate or learning_rate
-        l2_weight = l2_weight or self.l2_weight
         optimizer = torch.optim.AdamW(
             [
                 {
